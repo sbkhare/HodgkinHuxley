@@ -25,6 +25,10 @@ https://neuronaldynamics.epfl.ch/online/Ch2.S2.html#Ch2.F3:
 https://neuronaldynamics.epfl.ch/online/Ch3.S1.html:
     -Synapse model
 
+Inhibitory neurons:
+    -https://www.cell.com/current-biology/pdf/S0960-9822(09)00796-9.pdf: 15% of mammalian coritcal neurons are inhibitory
+    -https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4405698/; %age measure in mammals is 10-30%, optimal is 30%
+    -https://www.ncbi.nlm.nih.gov/pubmed/19965761: GABAergic (inhibitory) neurons have "widespread axonal arborizations" i.e. have high out-degree
 
 https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4816789/:
     -we determined the synaptic conductance per synaptic contact to be 0.77 ± 0.4 nS
@@ -50,14 +54,14 @@ VL = -65#-49#10.613 # mV : Mean = -11, Range = -4 to -22
 gNa = 40#120 #mS/cm^2 : Mean = 80/160, Range = 65-90/120-260
 gK = 35#36 #mS/cm^2 : Mean = 34, Range = 26-49
 gL = 0.3 #mS/cm^2 : DEfault = 0.3, Range = 0-3, 0-26, 13-50
-gC = 0.06 #mS/cm^2 : Default = 0.06, Range = 0-0.33
+gC = 0.04 #mS/cm^2 : Default = 0.06, Range = 0-0.33
 tau_r = 0.5 #ms : characteristic rise time
 tau_d = 8 #ms : characteristic decay time, Default=8
 alpha = 6.25 #ms^-1
 tau_syn = 100 #ms
 Vsyn = 20 #mV
 V0 = -20 #mV
-Esyn = -75 #mV
+Esyn = -75 #mV: use for inhibitory neurons
 injection_interval = 2 #ms: time between random sample of current injections
 
 def alpha_n(Vi):
@@ -114,7 +118,7 @@ def is_square(integer):
     root = math.sqrt(integer)
     return integer == int(root + 0.5) ** 2
     
-def adjmat(size, p=1, q=1, r=2, dim=2, show=True): #default is p=1 and r=2
+def adjmat(size, p=1, q=1, r=2, dim=2, inhib=0.15, show=True): #CHANGE SO THAT HIGHEST OUT-DEGREE NEURONS ARE INHIBITORY 
     directed_sw = nx.navigable_small_world_graph(size, p, q, r, dim) #A navigable small-world graph is a directed grid with additional long-range connections that are chosen randomly. 
     nx.draw_circular(directed_sw)
     aspl = nx.average_shortest_path_length(directed_sw)
@@ -125,10 +129,10 @@ def adjmat(size, p=1, q=1, r=2, dim=2, show=True): #default is p=1 and r=2
     #ADDING INHIBTORY NEURONS
     if dim == 1:
         ind = [j for j in range(size)]
-        inh = random.sample(ind, k=math.ceil(0.15 * size))
+        inh = random.sample(ind, k=math.ceil(inhib * size)) #CHANGE SO THAT HIGHEST OUT-DEGREE NEURONS ARE INHIBITORY 
     elif dim == 2:
         ind = [j for j in range(size**2)]
-        inh = random.sample(ind, k=math.ceil(0.15 * size**2)) #15% OF NEURONS ARE INHIBITORY
+        inh = random.sample(ind, k=math.ceil(inhib * size**2)) #CHANGE SO THAT HIGHEST OUT-DEGREE NEURONS ARE INHIBITORY 
     for i in inh:
         aij[i, :] *= -1
     if show:
@@ -182,7 +186,7 @@ class HodgkinHuxley():
         plt.matshow(a)
         plt.show()
     
-    def initializeSWNet(self, p, q, r, dim):
+    def initializeSWNet(self, p, q, r, dim, inhib):
         self.V = 100*np.random.rand(self.size) - 80  # -63*np.ones(self.size)
         self.n = x0(self.V, 'n')
         self.m = x0(self.V, 'm')
@@ -190,34 +194,35 @@ class HodgkinHuxley():
         self.r = ((1/tau_r - 1/tau_d)/(1 + np.exp(-self.V + V0)))/((1/tau_r - 1/tau_d)/(1 + np.exp(-self.V + V0)) + 1/tau_d) #np.random.rand(self.size) 
         self.s = np.random.rand(self.size)
         if dim == 1:
-            self.a = adjmat(self.size, p, q, r, dim)
+            self.a = adjmat(self.size, p, q, r, dim, inhib)
         elif dim == 2:
             if is_square(self.size):
-                self.a = adjmat(int(math.sqrt(self.size)), p, q, r, dim)
+                self.a = adjmat(int(math.sqrt(self.size)), p, q, r, dim, inhib)
             else:
                 raise Exception("Size must be square number if dim = 2")
             
         else:
             raise Exception("dim too high, choose dim < 2")
         
-    def inputCurrent(self, injection_interval=2, num_neurons=2):
+    def inputCurrent(self, injection_interval=2, num_neurons=2, show=False):
         num_injections = int(int(self.time/dt) / int(injection_interval/dt))
         t = np.arange(0, self.time, dt)
         ind = [j for j in range(self.size)]
         inp_ind = random.sample(ind, k=num_neurons)
         for i in range(self.Input.shape[0]):
-            if i in inp_ind:
-                t_inj = np.arange(0, duration, injection_interval)
-                injections = np.random.normal(0, 3.4, size=num_injections)
-                interp = np.interp(t, t_inj, injections)
-                self.Input[i, :] = interp
-        plt.figure()
-        for I_i in self.Input:
-            plt.plot(t, I_i)
-        plt.title("Input currents")
-        plt.xlabel("Time (ms)")
-        plt.ylabel("Current density (μA/cm^2)")
-        plt.show()
+#            if i in inp_ind:
+            t_inj = np.arange(0, duration, injection_interval)
+            injections = np.random.normal(0, 3.3, size=num_injections)
+            interp = np.interp(t, t_inj, injections)
+            self.Input[i, :] = interp
+        if show:
+            plt.figure()
+            for I_i in self.Input:
+                plt.plot(t, I_i)
+            plt.title("Input currents")
+            plt.xlabel("Time (ms)")
+            plt.ylabel("Current density (μA/cm^2)")
+            plt.show()
         return inp_ind
         
     def step(self, i):
@@ -269,30 +274,33 @@ class HodgkinHuxley():
         for t in range(int(self.time/dt)):
             self.step(t)
         
-    def trace(self, indlst):
+    def trace(self, indlst, thresh_lst):
         t = np.arange(0,self.time,dt)
         plt.figure()
         plt.subplot(411)
         plt.plot(t, self.output[indlst[0],:])
+        plt.axhline(y=thresh_lst[indlst[0]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[0]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
         plt.subplot(412)
         plt.plot(t, self.output[indlst[1],:])
+        plt.axhline(y=thresh_lst[indlst[1]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[1]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
         plt.subplot(413)
         plt.plot(t, self.output[indlst[2],:])
+        plt.axhline(y=thresh_lst[indlst[2]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[2]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
         plt.subplot(414)
         plt.plot(t, self.output[indlst[3],:])
+        plt.axhline(y=thresh_lst[indlst[3]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[3]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
-        plt.suptitle("Neural traces")
         plt.tight_layout()
         plt.show()
         
@@ -344,7 +352,7 @@ class HodgkinHuxley():
             plt.plot(t[500:], Ii[500:])
         plt.title("I_i(t)")
         plt.xlabel("Time (ms)")
-        plt.ylabel("Current (mA)")
+        plt.ylabel("Current (nA)")
         plt.show()
             
     def findSpikes(self, hertz=5000, save=False, show=False):
@@ -369,7 +377,7 @@ class HodgkinHuxley():
                 pk_times = peaks[nd]*dt
                 p.append(pk_times)
             plt.figure()
-            plt.eventplot(p)
+            plt.eventplot(p, color=[0,0,0])
             plt.title("Raster Plot")
             plt.xlabel("Time (ms)")
             plt.ylabel("Neuron")
@@ -381,17 +389,16 @@ class HodgkinHuxley():
 #    def raster(self):
 #        
     
-duration = 2000
-netsize = 15 
+duration = 3000
+netsize = 20 
 
 if __name__=='__main__':
-    
     hh = HodgkinHuxley(netsize, duration)
-    hh.initializeSWNet(p=2, q=1, r=0.5, dim=1)
+    hh.initializeSWNet(p=2, q=1, r=0.5, dim=1, inhib=0.15)
     inp_ind = hh.inputCurrent()
     hh.simulate()
-    hh.showOutput()
-    hh.show_r()
-    hh.showCurrent()
+#    hh.showOutput()
+#    hh.show_r()
+#    hh.showCurrent()
     peaks, out, thresh_lst = hh.findSpikes(show=True)
     #show_x0()

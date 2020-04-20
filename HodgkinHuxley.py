@@ -43,7 +43,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 from scipy.signal import find_peaks
+import sys
+import pickle as pkl
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial.distance import cdist
+from scipy.optimize import curve_fit
+from scipy.integrate import odeint
 
+num = 1#sys.argv[1]
+##################################################
 dt = 0.001
 
 #MODEL CONSTANTS
@@ -62,7 +70,6 @@ tau_syn = 100 #ms
 Vsyn = 20 #mV
 V0 = -20 #mV
 Esyn = -75 #mV: use for inhibitory neurons
-injection_interval = 2 #ms: time between random sample of current injections
 
 def alpha_n(Vi):
     #return 0.01*(Vi + 50)/(1 - np.exp(-0.1*(Vi + 50)))
@@ -117,10 +124,13 @@ def show_x0():
 def is_square(integer):
     root = math.sqrt(integer)
     return integer == int(root + 0.5) ** 2
+
+def linear_fit(x, a, b):
+    return a*x + b
     
 def adjmat(size, p=1, q=1, r=2, dim=2, inhib=0.15, show=True): #CHANGE SO THAT HIGHEST OUT-DEGREE NEURONS ARE INHIBITORY 
     directed_sw = nx.navigable_small_world_graph(size, p, q, r, dim) #A navigable small-world graph is a directed grid with additional long-range connections that are chosen randomly. 
-    nx.draw_circular(directed_sw)
+    #nx.draw_circular(directed_sw)
     aspl = nx.average_shortest_path_length(directed_sw)
     acc = nx.average_clustering(directed_sw)
     print("Average shortest path length: " + str(aspl))
@@ -136,8 +146,31 @@ def adjmat(size, p=1, q=1, r=2, dim=2, inhib=0.15, show=True): #CHANGE SO THAT H
     for i in inh:
         aij[i, :] *= -1
     if show:
+#        plt.figure()
         plt.matshow(aij)
-    return aij #Returns the graph adjacency matrix as a NumPy matrix.
+        plt.show()
+    return aij, aspl, acc #Returns the graph adjacency matrix as a NumPy matrix.
+
+def run(state, t, a, size):
+    V, n, m, h, r = state
+#    V = net.V
+#    n = net.n
+#    m = net.m
+#    h = net.h
+#    r = net.r
+    INa = gNa*(m**3)*h*(V - VNa)
+    IK = gK*(n**4)*(V - VK)
+    IL = gL*(V - VL)
+    Isyn = gC*(Vsyn - V)*r*a
+    Isyn = np.asarray(Isyn)
+    Isyn = Isyn.reshape((size,))
+    drdt = (1/tau_r - 1/tau_d)*(1 - r)/(1 + np.exp(-V + V0)) - r/tau_d
+    dVdt = (-INa -IK -IL + Isyn + np.random.normal(0, 3.3))/Cm
+    dndt = -(alpha_n(V) + beta_n(V))*n + alpha_n(V)
+    dmdt = -(alpha_m(V) + beta_m(V))*m + alpha_m(V)
+    dhdt = -(alpha_h(V) + beta_h(V))*h + alpha_h(V)
+    return dVdt, dndt, dmdt, dhdt, drdt
+    
     
 
 class HodgkinHuxley():
@@ -156,6 +189,9 @@ class HodgkinHuxley():
         self.rt = np.zeros((size, int(time/dt)))
         self.st = np.zeros((size, int(time/dt)))
         self.It = np.zeros((size, int(time/dt)))
+        self.nt = np.zeros((size, int(time/dt)))
+        self.mt = np.zeros((size, int(time/dt)))
+        self.ht = np.zeros((size, int(time/dt)))
                 
     def initializeRand(self, gating=False):
         self.V = 100*np.random.rand(self.size) - 80  # -63*np.ones(self.size)
@@ -182,11 +218,11 @@ class HodgkinHuxley():
         
     def assignAdjMat(self, a):
         self.a = a
-#        plt.figure()
+        plt.figure()
         plt.matshow(a)
         plt.show()
     
-    def initializeSWNet(self, p, q, r, dim, inhib):
+    def initializeSWNet(self, p, q, r, dim, inhib, show=True):
         self.V = 100*np.random.rand(self.size) - 80  # -63*np.ones(self.size)
         self.n = x0(self.V, 'n')
         self.m = x0(self.V, 'm')
@@ -194,15 +230,16 @@ class HodgkinHuxley():
         self.r = ((1/tau_r - 1/tau_d)/(1 + np.exp(-self.V + V0)))/((1/tau_r - 1/tau_d)/(1 + np.exp(-self.V + V0)) + 1/tau_d) #np.random.rand(self.size) 
         self.s = np.random.rand(self.size)
         if dim == 1:
-            self.a = adjmat(self.size, p, q, r, dim, inhib)
+            self.a, aspl, acc = adjmat(self.size, p, q, r, dim, inhib, show)
         elif dim == 2:
             if is_square(self.size):
-                self.a = adjmat(int(math.sqrt(self.size)), p, q, r, dim, inhib)
+                self.a, aspl, acc = adjmat(int(math.sqrt(self.size)), p, q, r, dim, inhib, show)
             else:
                 raise Exception("Size must be square number if dim = 2")
             
         else:
             raise Exception("dim too high, choose dim < 2")
+        return aspl, acc
         
     def inputCurrent(self, injection_interval=2, num_neurons=2, show=False):
         num_injections = int(int(self.time/dt) / int(injection_interval/dt))
@@ -212,7 +249,7 @@ class HodgkinHuxley():
         for i in range(self.Input.shape[0]):
 #            if i in inp_ind:
             t_inj = np.arange(0, duration, injection_interval)
-            injections = np.random.normal(0, 3.3, size=num_injections)
+            injections = np.random.normal(0, 3.4, size=num_injections)
             interp = np.interp(t, t_inj, injections)
             self.Input[i, :] = interp
         if show:
@@ -227,30 +264,16 @@ class HodgkinHuxley():
         
     def step(self, i):
         #RECORD CURRENT STATE
-        self.output[:, i] = self.V
-        self.rt[:, i] = self.r
-        self.st[:, i] = self.s
+        
         
         INa = gNa*(self.m**3)*self.h*(self.V - VNa)
         IK = gK*(self.n**4)*(self.V - VK)
         IL = gL*(self.V - VL)
         
-        drdt = (1/tau_r - 1/tau_d)*(1 - self.r)/(1 + np.exp(-self.V + V0)) - self.r/tau_d
-        self.r = drdt*dt + self.r
+        
+        
 #        dsdt = alpha*F(self.V)*(1 - self.s) - self.s/tau_syn
 #        self.s = dsdt*dt + self.s
-        
-#        weight = self.r*self.a
-#        weight = np.asarray(weight)
-#        weight = weight.reshape((self.size,))
-#        Isyn = gC*weight*(Vsyn - self.V)
-        
-#        a = np.asarray(self.a)
-#        w = (a.T * self.r).T
-#        colsums = w.sum(axis=0)
-#        w = w/colsums[np.newaxis, :]
-#        w = np.asmatrix(w)
-#        Isyn = gC*(Vsyn - self.V)*w
         
         Isyn = gC*(Vsyn - self.V)*self.r*self.a #gC*(self.V - Esyn)*self.r*self.a
         
@@ -259,12 +282,20 @@ class HodgkinHuxley():
         Isyn = np.asarray(Isyn)
         Isyn = Isyn.reshape((self.size,))
         self.It[:, i] = -INa - IK - IL + Isyn + self.Input[:, i]
+        self.output[:, i] = self.V
+        self.rt[:, i] = self.r
+#        self.st[:, i] = self.s
+        self.nt[:, i] = self.n
+        self.mt[:, i] = self.m
+        self.ht[:, i] = self.h
         
+        drdt = (1/tau_r - 1/tau_d)*(1 - self.r)/(1 + np.exp(-self.V + V0)) - self.r/tau_d
         dVdt = (-INa -IK -IL + Isyn + self.Input[:, i])/Cm
         dndt = -(alpha_n(self.V) + beta_n(self.V))*self.n + alpha_n(self.V)
         dmdt = -(alpha_m(self.V) + beta_m(self.V))*self.m + alpha_m(self.V)
         dhdt = -(alpha_h(self.V) + beta_h(self.V))*self.h + alpha_h(self.V)
         
+        self.r = drdt*dt + self.r
         self.V = dVdt*dt + self.V
         self.n = dndt*dt + self.n
         self.m = dmdt*dt + self.m
@@ -278,25 +309,25 @@ class HodgkinHuxley():
         t = np.arange(0,self.time,dt)
         plt.figure()
         plt.subplot(411)
-        plt.plot(t, self.output[indlst[0],:])
+        plt.plot(t, self.output[indlst[0],:], color='k')
         plt.axhline(y=thresh_lst[indlst[0]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[0]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
         plt.subplot(412)
-        plt.plot(t, self.output[indlst[1],:])
+        plt.plot(t, self.output[indlst[1],:], color='k')
         plt.axhline(y=thresh_lst[indlst[1]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[1]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
         plt.subplot(413)
-        plt.plot(t, self.output[indlst[2],:])
+        plt.plot(t, self.output[indlst[2],:], color='k')
         plt.axhline(y=thresh_lst[indlst[2]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[2]))
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
         plt.subplot(414)
-        plt.plot(t, self.output[indlst[3],:])
+        plt.plot(t, self.output[indlst[3],:], color='k')
         plt.axhline(y=thresh_lst[indlst[3]], color='r', linestyle='--')
         plt.title("Neuron {0}".format(indlst[3]))
         plt.xlabel("Time (ms)")
@@ -359,12 +390,22 @@ class HodgkinHuxley():
         peaks = {}
         neuron = 0
         threshlst = []
+        tau_u = []
+        tau_l = []
+        delta = 0
         for o in self.output:
             thresh = np.mean(o) + 2*np.std(o)
             threshlst.append(thresh)
             pks_ni = find_peaks(o, height=thresh) #Peaks of neuron i
             peaks[neuron] = pks_ni[0]
+            ps = np.array(pks_ni[0])*dt
+            taus = np.diff(ps)
+#            print(ps, taus)
+            tau_u.append(max(taus))
+            tau_l.append(min(taus))
             neuron += 1
+        delta = 10*math.log10(max(tau_u)/min(tau_l))
+        print("delta = " + str(delta))
         binsize = int(1000/hertz/dt)
         samples = int(self.time/dt/binsize)
         boolean_output = np.zeros((self.size, samples))
@@ -377,28 +418,110 @@ class HodgkinHuxley():
                 pk_times = peaks[nd]*dt
                 p.append(pk_times)
             plt.figure()
-            plt.eventplot(p, color=[0,0,0])
+#            plt.eventplot(p, color=[0,0,0])
+            for nd in peaks:
+                plt.scatter(p[nd], [nd]*len(p[nd]), marker='o', color='k', alpha=0.5)
             plt.title("Raster Plot")
             plt.xlabel("Time (ms)")
             plt.ylabel("Neuron")
             plt.show()
         if save:
-            np.save('boolean_output.npy', boolean_output)
-        return peaks, boolean_output, threshlst
-#    
-#    def raster(self):
-#        
+            plt.savefig("n{0}_t{1}_rasterplot_{2}.png".format(self.size, self.time, num))
+            np.save('n{0}_t{1}_boolean_output_{2}.npy'.format(self.size, self.time, num), boolean_output)
+        return peaks, boolean_output, threshlst, delta 
     
-duration = 3000
-netsize = 20 
+    def showNeuronStateSpace(self, neuron): #, dim1, dim2, dim3, x, y, 
+        fig = plt.figure()
+#        ax = fig.add_subplot(111, projection='3d')
+#        ax.plot3D(dim1[neuron,:], dim2[neuron,:], dim3[neuron,:], c='green')
+#        ax.set_xlabel(x)
+#        ax.set_ylabel(y)
+#        ax.set_zlabel(z)
+#        ax.set_title("Neuron {0} State Space".format(neuron))
+        plt.suptitle("Neuron {0} State Space".format(neuron), size=24)
+        ax1 = fig.add_subplot(231, projection='3d')
+        ax1.plot3D(self.nt[neuron,:], self.mt[neuron,:], self.output[neuron,:], c='green')
+        ax1.set_xlabel('n')
+        ax1.set_ylabel('m')
+        ax1.set_zlabel('V')
+        ax2 = fig.add_subplot(232, projection='3d')
+        ax2.plot3D(self.nt[neuron,:], self.ht[neuron,:], self.output[neuron,:], c='brown')
+        ax2.set_xlabel('n')
+        ax2.set_ylabel('h')
+        ax2.set_zlabel('V')
+        ax3 = fig.add_subplot(233, projection='3d')
+        ax3.plot3D(self.mt[neuron,:], self.ht[neuron,:], self.output[neuron,:], c='gray')
+        ax3.set_xlabel('m')
+        ax3.set_ylabel('h')
+        ax3.set_zlabel('V')
+        ax4 = fig.add_subplot(234, projection='3d')
+        ax4.plot3D(self.nt[neuron,:], self.rt[neuron,:], self.output[neuron,:], c='blue')
+        ax4.set_xlabel('n')
+        ax4.set_ylabel('r')
+        ax4.set_zlabel('V')
+        ax5 = fig.add_subplot(235, projection='3d')
+        ax5.plot3D(self.mt[neuron,:], self.rt[neuron,:], self.output[neuron,:], c='orange')
+        ax5.set_xlabel('m')
+        ax5.set_ylabel('r')
+        ax5.set_zlabel('V')
+        ax6 = fig.add_subplot(236, projection='3d')
+        ax6.plot3D(self.ht[neuron,:], self.rt[neuron,:], self.output[neuron,:], c='black')
+        ax6.set_xlabel('h')
+        ax6.set_ylabel('r')
+        ax6.set_zlabel('V')
+        
+    def corr_dim(self, neuron, max_ep, show=False): #Correlation dimension of a neuron - https://en.wikipedia.org/wiki/Correlation_dimension
+        ep_range = np.arange(np.e, max_ep, max_ep/100)
+#        t = np.arange(0,self.time,dt)
+        state_vec = np.zeros((self.time, 5))
+        for i in range(int(self.time/dt) - 1):
+            if i%1000 == 0:
+                state_vec[int(i/1000),0] = self.output[neuron,i]
+                state_vec[int(i/1000),1] = 100*self.nt[neuron,i]
+                state_vec[int(i/1000),2] = 100*self.mt[neuron,i]
+                state_vec[int(i/1000),3] = 100*self.ht[neuron,i]
+                state_vec[int(i/1000),4] = 100*self.rt[neuron,i]
+        cnt_lst = []
+        for epsilon in ep_range:
+            dist = cdist(state_vec, state_vec)
+#            print(len(np.where(dist < epsilon)))
+            cnt = len(dist[dist < epsilon])
+            cnt_lst.append(cnt)
+        cnts = np.array(cnt_lst)/self.time**2
+        popt, pcov = curve_fit(linear_fit, np.log(ep_range), np.log(np.array(cnts)))
+        if show:
+            plt.figure()
+            plt.scatter(np.log(ep_range), np.log(np.array(cnts)))
+    #        C = np.polyfit(np.log(ep_range), np.log(np.array(cnt_lst)), 1)
+    #        Cline = C[0]*np.log(ep_range) + C[1]
+            print(popt)
+            plt.plot(np.log(ep_range), linear_fit(np.log(ep_range), *popt), '--', color='r')
+            plt.title("Correlation dimension (log-log), \u03BD = {0}".format(round(popt[0], 4)))
+            plt.xlabel("log(\u03B5)")
+            plt.ylabel("log(C(\u03B5))")
+        
+    
+netsize = 24#int(sys.argv[2])
+duration = 1500#float(sys.argv[3])
+inhibitory = 0.3#float(sys.argv[4])
 
 if __name__=='__main__':
     hh = HodgkinHuxley(netsize, duration)
-    hh.initializeSWNet(p=2, q=1, r=0.5, dim=1, inhib=0.15)
+    
+    aspl, acc = hh.initializeSWNet(p=2, q=1, r=0.5, dim=1, inhib=inhibitory, show=True)
+##    np.save("n{0}_t{1}_adjmat_{2}.npy".format(hh.size, hh.time, num), hh.a)
+##    net_stats = {"Fraction inhibitory": inhibitory, "Avg. shortest path length": aspl, "Avg. clestering coeff.": acc}
+##    pkl.dump(net_stats, open("n{0}_t{1}_netstats_{2}.pkl".format(hh.size, hh.time, num), 'wb'))
+#    
     inp_ind = hh.inputCurrent()
     hh.simulate()
-#    hh.showOutput()
-#    hh.show_r()
-#    hh.showCurrent()
-    peaks, out, thresh_lst = hh.findSpikes(show=True)
-    #show_x0()
+#    #show_x0()
+##    hh.showOutput()
+##    hh.show_r()
+##    hh.showCurrent()
+    peaks, out, thresh_lst, delta = hh.findSpikes(hertz=5000, save=False, show=True)
+#    np.save("n{0}_t{1}_neuron_voltages_{2}.npy".format(hh.size, hh.time, num), hh.output)
+#    np.save("n{0}_t{1}_peaks_{2}.npy".format(hh.size, hh.time, num), peaks)
+#    np.save("n{0}_t{1}_thresh_lst_{2}.npy".format(hh.size, hh.time, num), np.array(thresh_lst))
+    
+   
